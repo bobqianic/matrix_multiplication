@@ -6,6 +6,7 @@
 #include <immintrin.h>
 #include <fmaintrin.h>
 
+
 struct alignas(32) matrix_2D {
     float** body = nullptr;
     int x = 0;
@@ -94,12 +95,31 @@ matrix_2D transpose_matrix_2D(matrix_2D &a) {
     matrix.body = new (std::align_val_t(32)) float* [matrix.x];
     for (int i = 0; i < matrix.x; i++) {
         matrix.body[i] = new (std::align_val_t(32)) float [matrix.y];
+    }
+    for (int i = 0; i < matrix.x; i+=16) {
+        for (int j = 0; j < matrix.y; j++) {
+            for (int k = i; k < std::min(matrix.x, i + 16); k++) {
+                matrix.body[k][j] = a.body[j][k];
+            }
+        }
+    }
+    return matrix;
+}
+
+
+/*matrix_2D transpose_matrix_2D_slow(matrix_2D &a) {
+    matrix_2D matrix;
+    matrix.x = a.y;
+    matrix.y = a.x;
+    matrix.body = new (std::align_val_t(32)) float* [matrix.x];
+    for (int i = 0; i < matrix.x; i++) {
+        matrix.body[i] = new (std::align_val_t(32)) float [matrix.y];
         for (int j = 0; j < matrix.y; j++) {
             matrix.body[i][j] = a.body[j][i];
         }
     }
     return matrix;
-}
+}*/
 
 float sum8(__m256 x) {
     const __m128 hiQuad = _mm256_extractf128_ps(x, 1);
@@ -115,6 +135,32 @@ float sum8(__m256 x) {
 }
 
 matrix_2D matrix_mult_2D(matrix_2D &a, matrix_2D &b) {
+    int a_y = a.y, a_x = a.x, b_x = b.x, b_y = b.y;
+    const int tile_size = 64;
+    matrix_2D c = transpose_matrix_2D(a);
+    matrix_2D d = get_matrix_2D(b_x, a_y, 0);
+    for (int i = 0; i < a_y; i += tile_size) {
+        for (int j = 0; j < b_x; j += tile_size) {
+            for (int t = 0; t < a_x; t += tile_size) {
+                for (int ii = i; ii < std::min(i + tile_size, a_y); ii++) {
+                    for (int jj = j; jj < std::min(j + tile_size, b_x); jj++) {
+                        __m256 seg_sum = _mm256_setzero_ps();
+                        for (int k = t; k < std::min(t + tile_size, a_x); k+=8) {
+                            __m256 seg_a = _mm256_load_ps(c.body[ii] + k);
+                            __m256 seg_b = _mm256_load_ps(b.body[jj] + k);
+                            seg_sum = _mm256_fmadd_ps(seg_a, seg_b, seg_sum);
+                        }
+                        d.body[jj][ii] += sum8(seg_sum);
+                    }
+                }
+            }
+        }
+    }
+    free_matrix_2D(c);
+    return d;
+}
+
+matrix_2D matrix_mult_2D_original(matrix_2D &a, matrix_2D &b) {
     matrix_2D c = transpose_matrix_2D(a);
     matrix_2D d = get_matrix_2D(b.x, a.y, 0);
     for (int i = 0; i < a.y; i++) {
@@ -131,6 +177,34 @@ matrix_2D matrix_mult_2D(matrix_2D &a, matrix_2D &b) {
     free_matrix_2D(c);
     return d;
 }
+
+matrix_2D matrix_mult_2D_openai(matrix_2D &a, matrix_2D &b) {
+    int a_y = a.y, a_x = a.x, b_x = b.x;
+    matrix_2D d = get_matrix_2D(b_x, a_y, 0);
+    int block_size = 64; // Choose an appropriate block size
+    for (int ii = 0; ii < a_y; ii += block_size) {
+        for (int jj = 0; jj < b_x; jj += block_size) {
+            for (int i = ii; i < std::min(ii + block_size, a_y); i++) {
+                for (int j = jj; j < std::min(jj + block_size, b_x); j++) {
+                    __m256 seg_sum = _mm256_setzero_ps();
+                    int k = 0;
+                    for (; k <= a_x - 8; k += 8) {
+                        __m256 seg_a = _mm256_load_ps(a.body[i] + k);
+                        __m256 seg_b = _mm256_load_ps(b.body[j] + k);
+                        seg_sum = _mm256_fmadd_ps(seg_a, seg_b, seg_sum);
+                    }
+                    d.body[j][i] = sum8(seg_sum);
+                    // Handle remaining elements
+                    for (; k < a_x; k++) {
+                        d.body[j][i] += a.body[i][k] * b.body[j][k];
+                    }
+                }
+            }
+        }
+    }
+    return d;
+}
+
 
 int benchmark(int from, int to, int step) {
     auto* buffer = new float [1 + (to - from) / step];
@@ -184,24 +258,43 @@ int benchmark(int from, int to, int step) {
 }
 
 int main() {
-    auto in_1 = get_rand_matrix_2D(256, 256, 0, 100);
-    auto in_2 = get_rand_matrix_2D(256, 256, 0, 100);
+    //SetProcessAffinityMask(GetCurrentProcess(), static_cast<DWORD_PTR>(1) << 1);
+    benchmark(8, 1024, 8);
+    benchmark(1088, 2048, 64);
+    benchmark(2304, 4096, 256);
+}
+
+
+/*int main(){
+    auto in_1 = get_rand_matrix_2D(4096, 4096, 0, 100);
+    auto in_2 = get_rand_matrix_2D(4096, 4096, 0, 100);
     auto start = std::chrono::high_resolution_clock::now();
-    auto out_3 = matrix_mult_2D(in_1,in_2);
+    auto out_3 = matrix_mult_2D_original(in_1,in_2);
     auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    std::cout << "No Cache Optimization (Bob): " << static_cast<float>(duration.count()) / 1000 << "ms" << std::endl;
     free_matrix_2D(in_1);
     free_matrix_2D(in_2);
     free_matrix_2D(out_3);
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    if (duration.count() < 1000) {
-        std::cout << duration.count() << "us" << std::endl;
-    } else if (duration.count() < 1000000){
-        std::cout << static_cast<float>(duration.count()) / 1000 << "ms" << std::endl;
-    } else {
-        std::cout << static_cast<float>(duration.count()) / 1000000 << "s" << std::endl;
-    }
-    //SetProcessAffinityMask(GetCurrentProcess(), static_cast<DWORD_PTR>(1) << 1);
-    //benchmark(8, 1024, 8);
-    //benchmark(1088, 2048, 64);
-    //benchmark(2304, 4096, 256);
-}
+    in_1 = get_rand_matrix_2D(4096, 4096, 0, 100);
+    in_2 = get_rand_matrix_2D(4096, 4096, 0, 100);
+    start = std::chrono::high_resolution_clock::now();
+    out_3 = matrix_mult_2D(in_1,in_2);
+    end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    std::cout << "Cache Optimization (Bob): " << static_cast<float>(duration.count()) / 1000 << "ms" << std::endl;
+    free_matrix_2D(in_1);
+    free_matrix_2D(in_2);
+    free_matrix_2D(out_3);
+    in_1 = get_rand_matrix_2D(4096, 4096, 0, 100);
+    in_2 = get_rand_matrix_2D(4096, 4096, 0, 100);
+    start = std::chrono::high_resolution_clock::now();
+    out_3 = matrix_mult_2D_openai(in_1,in_2);
+    end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    std::cout << "Cache Optimization (GPT4): " << static_cast<float>(duration.count()) / 1000 << "ms" << std::endl;
+    free_matrix_2D(in_1);
+    free_matrix_2D(in_2);
+    free_matrix_2D(out_3);
+}*/
+
