@@ -205,6 +205,34 @@ matrix_2D matrix_mult_2D_openai(matrix_2D &a, matrix_2D &b) {
     return d;
 }
 
+matrix_2D matrix_mult_2D_openai_corrected(matrix_2D &a, matrix_2D &b) {
+    int a_y = a.y, a_x = a.x, b_x = b.x;
+    matrix_2D c = transpose_matrix_2D(a);
+    matrix_2D d = get_matrix_2D(b_x, a_y, 0);
+    int block_size = 64; // Choose an appropriate block size
+    for (int ii = 0; ii < a_y; ii += block_size) {
+        for (int jj = 0; jj < b_x; jj += block_size) {
+            for (int i = ii; i < std::min(ii + block_size, a_y); i++) {
+                for (int j = jj; j < std::min(jj + block_size, b_x); j++) {
+                    __m256 seg_sum = _mm256_setzero_ps();
+                    int k = 0;
+                    for (; k <= a_x - 8; k += 8) {
+                        __m256 seg_a = _mm256_load_ps(c.body[i] + k);
+                        __m256 seg_b = _mm256_load_ps(b.body[j] + k);
+                        seg_sum = _mm256_fmadd_ps(seg_a, seg_b, seg_sum);
+                    }
+                    d.body[j][i] = sum8(seg_sum);
+                    // Handle remaining elements
+                    for (; k < a_x; k++) {
+                        d.body[j][i] += c.body[i][k] * b.body[j][k];
+                    }
+                }
+            }
+        }
+    }
+    return d;
+}
+
 
 int benchmark(int from, int to, int step) {
     auto* buffer = new float [1 + (to - from) / step];
@@ -266,8 +294,9 @@ int main() {
 
 
 /*int main(){
-    auto in_1 = get_rand_matrix_2D(4096, 4096, 0, 100);
-    auto in_2 = get_rand_matrix_2D(4096, 4096, 0, 100);
+    int size_x = 256, size_y = 256;
+    auto in_1 = get_rand_matrix_2D(size_x, size_y, 0, 100);
+    auto in_2 = get_rand_matrix_2D(size_x, size_y, 0, 100);
     auto start = std::chrono::high_resolution_clock::now();
     auto out_3 = matrix_mult_2D_original(in_1,in_2);
     auto end = std::chrono::high_resolution_clock::now();
@@ -276,8 +305,8 @@ int main() {
     free_matrix_2D(in_1);
     free_matrix_2D(in_2);
     free_matrix_2D(out_3);
-    in_1 = get_rand_matrix_2D(4096, 4096, 0, 100);
-    in_2 = get_rand_matrix_2D(4096, 4096, 0, 100);
+    in_1 = get_rand_matrix_2D(size_x, size_y, 0, 100);
+    in_2 = get_rand_matrix_2D(size_x, size_y, 0, 100);
     start = std::chrono::high_resolution_clock::now();
     out_3 = matrix_mult_2D(in_1,in_2);
     end = std::chrono::high_resolution_clock::now();
@@ -286,13 +315,38 @@ int main() {
     free_matrix_2D(in_1);
     free_matrix_2D(in_2);
     free_matrix_2D(out_3);
-    in_1 = get_rand_matrix_2D(4096, 4096, 0, 100);
-    in_2 = get_rand_matrix_2D(4096, 4096, 0, 100);
+    in_1 = get_rand_matrix_2D(size_x, size_y, 0, 100);
+    in_2 = get_rand_matrix_2D(size_x, size_y, 0, 100);
     start = std::chrono::high_resolution_clock::now();
     out_3 = matrix_mult_2D_openai(in_1,in_2);
     end = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
     std::cout << "Cache Optimization (GPT4): " << static_cast<float>(duration.count()) / 1000 << "ms" << std::endl;
+    free_matrix_2D(in_1);
+    free_matrix_2D(in_2);
+    free_matrix_2D(out_3);
+}*/
+
+
+/*int main() {
+    int size_x = 512, size_y = 512;
+    auto in_1 = get_rand_matrix_2D(size_x, size_y, 0, 100);
+    auto in_2 = get_rand_matrix_2D(size_x, size_y, 0, 100);
+    print_matrix_2D(in_1);
+    print_matrix_2D(in_2);
+    auto start = std::chrono::high_resolution_clock::now();
+    auto out_3 = matrix_mult_2D(in_1,in_2);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    std::cout << "Cache Optimization (Bob): " << static_cast<float>(duration.count()) / 1000 << "ms" << std::endl;
+    print_matrix_2D(out_3);
+    free_matrix_2D(out_3);
+    start = std::chrono::high_resolution_clock::now();
+    out_3 = matrix_mult_2D_openai(in_1,in_2);
+    end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    std::cout << "Cache Optimization (GPT4): " << static_cast<float>(duration.count()) / 1000 << "ms" << std::endl;
+    print_matrix_2D(out_3);
     free_matrix_2D(in_1);
     free_matrix_2D(in_2);
     free_matrix_2D(out_3);
